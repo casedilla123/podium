@@ -1,0 +1,11 @@
+{
+  "name": "Podium",
+  "short_name": "Podium",
+  "description": "Cardboard VR public-speaking trainer",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12"
+}
