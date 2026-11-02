@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { CONFIG } from '../config';
-import { EYE_Y, type Seat } from '../scene/room';
+import type { Seat } from '../scene/room';
 import { classify, type MemberState } from './attention';
 
 export const BODY = {
@@ -12,13 +12,20 @@ export const BODY = {
   torso: 0.75,
   neck: 0.13,
   headRadius: 0.13,
+  shoulderX: 0.22,
+  shoulderDrop: 0.15,
+  arm: 0.5,
 };
 
-interface Pose {
+export type AmbientSound = 'cough' | 'whisper' | 'creak';
+
+export interface Pose {
   lean: number; // + forward, - slumped back
   headPitch: number; // + looks down
   headYaw: number; // + turns to the member's left
   lift: number; // small vertical jolt for the "caught" moment
+  armLift: number; // arm raised forward from hanging straight down
+  armIn: number; // arms turned in toward the middle
 }
 
 const deg = THREE.MathUtils.degToRad;
@@ -26,8 +33,10 @@ const deg = THREE.MathUtils.degToRad;
 export class Member {
   interest: number = CONFIG.attention.startInterest;
   state: MemberState = 'neutral';
-  readonly pose: Pose = { lean: 0, headPitch: 0, headYaw: 0, lift: 0 };
-  private readonly target: Pose = { lean: 0, headPitch: 0, headYaw: 0, lift: 0 };
+  readonly pose: Pose = { lean: 0, headPitch: 0, headYaw: 0, lift: 0, armLift: 0.9, armIn: 0.25 };
+  /** Called when this member makes an audible ambient sound. */
+  onSound: ((kind: AmbientSound) => void) | null = null;
+  private readonly target: Pose = { ...this.pose };
   /** Pitch that points the head at the speaker's eyes. */
   private readonly lookAtSpeakerPitch: number;
   private caughtUntil = -1;
@@ -40,13 +49,14 @@ export class Member {
   constructor(
     readonly seat: Seat,
     readonly personality: number,
+    speakerEye: THREE.Vector3,
     private readonly rng: () => number,
   ) {
     const headY = seat.position.y + BODY.hipHeight + BODY.torso + BODY.neck;
-    const dist = Math.hypot(seat.position.x, seat.position.z);
-    this.lookAtSpeakerPitch = -Math.atan2(EYE_Y - headY, dist);
+    const dist = Math.hypot(seat.position.x - speakerEye.x, seat.position.z - speakerEye.z);
+    this.lookAtSpeakerPitch = -Math.atan2(speakerEye.y - headY, dist);
     this.nextAmbient = rng() * CONFIG.audience.ambientMaxGap;
-    this.state = classify(this.interest, 'neutral', CONFIG.attention);
+    this.reset(this.interest);
   }
 
   reset(interest: number): void {
@@ -62,18 +72,18 @@ export class Member {
   /** Called after the attention step with this member's gaze credit. */
   update(dt: number, time: number, credit: number, live: boolean): void {
     const A = CONFIG.audience;
-    const prev = this.state;
-    this.state = classify(this.interest, prev, CONFIG.attention);
+    this.state = classify(this.interest, this.state, CONFIG.attention);
 
     // The "caught" moment: looked at while low, snap upright and hold it while interest recovers.
     if (live && credit > 0.3 && this.interest < A.caughtBelow && time > this.caughtUntil) {
-      this.caughtUntil = time + 2.2;
+      this.caughtUntil = time + A.caughtHold;
       this.pose.lift = 0.06;
+      if (this.rng() < 0.5) this.onSound?.('creak');
     }
     const caught = time < this.caughtUntil;
     if (!caught) this.caughtUntil = -1;
 
-    // Ambient life: glances, fidgets, nods on random timers.
+    // Ambient life: glances, fidgets, nods, whispers, coughs on random timers.
     if (time > this.nextAmbient) {
       this.nextAmbient = time + A.ambientMinGap + this.rng() * (A.ambientMaxGap - A.ambientMinGap);
       const side = this.rng() < 0.5 ? -1 : 1;
@@ -83,11 +93,18 @@ export class Member {
           break;
         case 'neutral':
           this.glance(time, side * deg(15 + this.rng() * 25), deg(-5 + this.rng() * 10), 1.5);
+          if (live && this.rng() < A.coughChance) this.onSound?.('cough');
           break;
         case 'drifting':
           // Check the clock behind them, or whisper to a neighbour.
-          if (this.rng() < 0.5) this.glance(time, side * deg(55 + this.rng() * 20), deg(-20), 2.5);
-          else this.glance(time, side * deg(70), deg(5), 3);
+          if (this.rng() < 0.5) {
+            this.glance(time, side * deg(55 + this.rng() * 20), deg(-20), 2.5);
+            if (live && this.rng() < 0.3) this.onSound?.('creak');
+          } else {
+            this.glance(time, side * deg(70), deg(5), 3);
+            if (live) this.onSound?.('whisper');
+          }
+          if (live && this.rng() < A.coughChance) this.onSound?.('cough');
           break;
         case 'checkedOut':
           if (this.rng() < 0.3) this.glance(time, side * deg(20), deg(-10), 1.2); // yawn
@@ -98,21 +115,15 @@ export class Member {
 
     const t = this.target;
     if (caught || this.state === 'engaged') {
-      t.lean = deg(8);
-      t.headPitch = this.lookAtSpeakerPitch;
-      t.headYaw = 0;
+      Object.assign(t, { lean: deg(8), headPitch: this.lookAtSpeakerPitch, headYaw: 0, armLift: deg(55), armIn: deg(14) });
     } else if (this.state === 'neutral') {
-      t.lean = 0;
-      t.headPitch = this.lookAtSpeakerPitch + deg(4);
-      t.headYaw = 0;
+      Object.assign(t, { lean: 0, headPitch: this.lookAtSpeakerPitch + deg(4), headYaw: 0, armLift: deg(48), armIn: deg(10) });
     } else if (this.state === 'drifting') {
-      t.lean = deg(-14);
-      t.headPitch = deg(10);
-      t.headYaw = deg(15) * (this.seat.col % 2 ? 1 : -1);
+      // Slumped back, arms crossed, head turned a little away.
+      Object.assign(t, { lean: deg(-14), headPitch: deg(10), headYaw: deg(15) * (this.seat.col % 2 ? 1 : -1), armLift: deg(72), armIn: deg(44) });
     } else {
-      t.lean = deg(16);
-      t.headPitch = deg(45); // down at a phone
-      t.headYaw = 0;
+      // Hunched over a phone held in both hands.
+      Object.assign(t, { lean: deg(16), headPitch: deg(45), headYaw: 0, armLift: deg(78), armIn: deg(26) });
     }
     if (glancing && !caught) {
       t.headYaw = this.glanceYaw;
@@ -130,6 +141,8 @@ export class Member {
     p.lean += (t.lean - p.lean) * k;
     p.headPitch += (t.headPitch - p.headPitch) * k;
     p.headYaw += (t.headYaw - p.headYaw) * k;
+    p.armLift += (t.armLift - p.armLift) * k;
+    p.armIn += (t.armIn - p.armIn) * k;
     p.lift += (0 - p.lift) * (1 - Math.exp(-dt / 0.15));
   }
 

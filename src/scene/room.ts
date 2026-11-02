@@ -1,8 +1,9 @@
-// Lecture hall built from simple shapes. The speaker stands at the origin on a
-// low stage facing -Z; the audience sits in 4 curved, stepped rows in front.
+// Venues built from simple shapes. The speaker is at the origin facing -Z;
+// the audience sits in curved, stepped rows in front. One builder covers every
+// venue in config.ts so each extra room is a few numbers, not new code.
 
 import * as THREE from 'three';
-import { CONFIG } from '../config';
+import type { VenueSpec } from '../config';
 
 export type Section = 'front-left' | 'front-center' | 'front-right' | 'back-left' | 'back-center' | 'back-right';
 export const SECTIONS: readonly Section[] = [
@@ -13,6 +14,13 @@ export const SECTIONS: readonly Section[] = [
   'back-center',
   'back-right',
 ];
+
+/** Human label; single-row venues drop the front/back part. */
+export function sectionLabel(s: Section, singleRow: boolean): string {
+  const [depth, side] = s.split('-');
+  const sideName = side === 'center' ? 'centre' : side;
+  return singleRow ? sideName[0].toUpperCase() + sideName.slice(1) : `${depth[0].toUpperCase()}${depth.slice(1)}-${sideName}`;
+}
 
 export interface Seat {
   index: number;
@@ -29,50 +37,67 @@ export interface Seat {
 }
 
 export interface Room {
+  venue: VenueSpec;
   group: THREE.Group;
   seats: Seat[];
+  /** World position of the speaker's eyes. Never changes during a run. */
+  eye: THREE.Vector3;
   /** Meshes the reticle can rest on so it sits at the right depth. */
   depthMeshes: THREE.Object3D[];
-  /** Anchor on the slanted podium top for the timer + notes panel. */
-  podiumTop: THREE.Object3D;
+  /** Where the timer panel sits: podium top, or the table in front of you. */
+  readingAnchor: THREE.Object3D;
   update(now: Date): void;
+  dispose(): void;
 }
-
-const R = CONFIG.room;
-const EYE_Y = R.stageHeight + R.eyeHeight;
-export { EYE_Y };
-
-const PALETTE = {
-  floor: 0x3a2f2a,
-  wall: 0x4a4e5a,
-  ceiling: 0x4a4440,
-  stage: 0x5b4636,
-  platform: 0x332b27,
-  seat: 0x7a2e2e,
-  podium: 0x6b4f3a,
-  screen: 0xd9dde3,
-  clockFace: 0xf2efe6,
-  clockHand: 0x1a1a1a,
-};
 
 const mat = (color: number) => new THREE.MeshLambertMaterial({ color });
 
-function sectionFor(row: number, azimuthDeg: number): Section {
-  const depth = row < 2 ? 'front' : 'back';
-  const side = azimuthDeg < -20 ? 'left' : azimuthDeg > 20 ? 'right' : 'center';
+export function sectionFor(row: number, rowCount: number, azimuthDeg: number, maxHalfSpanDeg: number): Section {
+  const depth = rowCount > 1 && row >= rowCount / 2 ? 'back' : 'front';
+  const third = maxHalfSpanDeg / 3;
+  const side = azimuthDeg < -third ? 'left' : azimuthDeg > third ? 'right' : 'center';
   return `${depth}-${side}` as Section;
 }
 
-/** Flat annular sector in the XZ plane, extruded upward to `height`. Azimuth 0 points at -Z. */
+/** Seat layout for a venue, without any three.js meshes. */
+export function layoutSeats(venue: VenueSpec): Seat[] {
+  const seats: Seat[] = [];
+  const maxHalf = Math.max(...venue.rows.map((r) => r.halfSpanDeg));
+  venue.rows.forEach((spec, row) => {
+    const floorY = row * venue.rowRise;
+    const half = THREE.MathUtils.degToRad(spec.halfSpanDeg);
+    for (let col = 0; col < spec.seats; col++) {
+      const a = spec.seats === 1 ? 0 : -half + (2 * half * col) / (spec.seats - 1);
+      const position = new THREE.Vector3(spec.radius * Math.sin(a), floorY, -spec.radius * Math.cos(a));
+      const azimuthDeg = THREE.MathUtils.radToDeg(a);
+      seats.push({
+        index: seats.length,
+        row,
+        col,
+        position,
+        yaw: Math.atan2(-position.x, -position.z),
+        azimuthDeg,
+        section: sectionFor(row, venue.rows.length, azimuthDeg, maxHalf),
+      });
+    }
+  });
+  return seats;
+}
+
+/** Indices of the seats beside each seat in its row. */
+export function seatNeighbors(seats: readonly Seat[]): number[][] {
+  return seats.map((s) => seats.filter((o) => o.row === s.row && Math.abs(o.col - s.col) === 1).map((o) => o.index));
+}
+
+/** Flat annular sector, extruded upward to `height`. Azimuth 0 points at -Z. */
 function rowPlatform(inner: number, outer: number, halfSpanRad: number, height: number): THREE.BufferGeometry {
   const shape = new THREE.Shape();
   const steps = 24;
   // Shape space (x, y) maps to world (x, -y) after rotateX(-90°), so y = r cos(phi) puts it at -Z.
   for (let s = 0; s <= steps; s++) {
     const a = -halfSpanRad + (2 * halfSpanRad * s) / steps;
-    const p = [outer * Math.sin(a), outer * Math.cos(a)] as const;
-    if (s === 0) shape.moveTo(p[0], p[1]);
-    else shape.lineTo(p[0], p[1]);
+    if (s === 0) shape.moveTo(outer * Math.sin(a), outer * Math.cos(a));
+    else shape.lineTo(outer * Math.sin(a), outer * Math.cos(a));
   }
   for (let s = steps; s >= 0; s--) {
     const a = -halfSpanRad + (2 * halfSpanRad * s) / steps;
@@ -83,7 +108,7 @@ function rowPlatform(inner: number, outer: number, halfSpanRad: number, height: 
   return geo;
 }
 
-export function buildRoom(): Room {
+export function buildRoom(venue: VenueSpec): Room {
   const group = new THREE.Group();
   const depthMeshes: THREE.Object3D[] = [];
   const add = <T extends THREE.Object3D>(o: T, depth = true): T => {
@@ -91,117 +116,142 @@ export function buildRoom(): Room {
     if (depth) depthMeshes.push(o);
     return o;
   };
-
-  const width = R.hallWidth;
-  const length = R.hallFront - R.hallBack;
-  const midZ = (R.hallFront + R.hallBack) / 2;
+  const P = venue.palette;
+  const H = venue.hall;
+  const length = H.front - H.back;
+  const midZ = (H.front + H.back) / 2;
 
   // Shell: floor, ceiling, walls.
-  const floor = add(new THREE.Mesh(new THREE.PlaneGeometry(width, length), mat(PALETTE.floor)));
+  const floor = add(new THREE.Mesh(new THREE.PlaneGeometry(H.width, length), mat(P.floor)));
   floor.rotation.x = -Math.PI / 2;
   floor.position.z = midZ;
 
   // Faces down, so the lights barely reach it: a faint glow keeps it from reading as a black void.
   const ceiling = add(
     new THREE.Mesh(
-      new THREE.PlaneGeometry(width, length),
-      new THREE.MeshLambertMaterial({ color: PALETTE.ceiling, emissive: 0x2e2a27 }),
+      new THREE.PlaneGeometry(H.width, length),
+      new THREE.MeshLambertMaterial({ color: 0x4a4440, emissive: 0x2e2a27 }),
     ),
   );
   ceiling.rotation.x = Math.PI / 2;
-  ceiling.position.set(0, R.hallHeight, midZ);
+  ceiling.position.set(0, H.height, midZ);
 
   const walls = add(
     new THREE.Mesh(
-      // Slightly taller than the hall so its top and bottom hide behind the ceiling and floor.
-      new THREE.BoxGeometry(width, R.hallHeight + 0.2, length),
-      new THREE.MeshLambertMaterial({ color: PALETTE.wall, side: THREE.BackSide }),
+      // Slightly taller than the room so its top and bottom hide behind the ceiling and floor.
+      new THREE.BoxGeometry(H.width, H.height + 0.2, length),
+      new THREE.MeshLambertMaterial({ color: P.wall, side: THREE.BackSide }),
     ),
   );
-  walls.position.set(0, R.hallHeight / 2, midZ);
+  walls.position.set(0, H.height / 2, midZ);
 
   // Stage the speaker stands on.
-  const stageDepth = R.hallFront + 1.8;
-  const stage = add(new THREE.Mesh(new THREE.BoxGeometry(10, R.stageHeight, stageDepth), mat(PALETTE.stage)));
-  stage.position.set(0, R.stageHeight / 2, R.hallFront - stageDepth / 2);
+  const firstRow = venue.rows[0].radius;
+  if (venue.stageHeight > 0) {
+    const edge = -firstRow * 0.5;
+    const depth = H.front - edge;
+    const stage = add(
+      new THREE.Mesh(new THREE.BoxGeometry(Math.min(H.width - 2, 12), venue.stageHeight, depth), mat(P.stage)),
+    );
+    stage.position.set(0, venue.stageHeight / 2, H.front - depth / 2);
+  }
 
-  // Projector screen behind the speaker; room for a slides feature later.
-  const screen = add(new THREE.Mesh(new THREE.PlaneGeometry(4.2, 2.4), mat(PALETTE.screen)));
-  screen.position.set(0, 3.6, R.hallFront - 0.02);
-  screen.rotation.y = Math.PI;
+  // Projector screen or whiteboard behind the speaker.
+  const board = add(
+    new THREE.Mesh(
+      venue.screen ? new THREE.PlaneGeometry(4.2, 2.4) : new THREE.PlaneGeometry(3.6, 1.2),
+      new THREE.MeshLambertMaterial({ color: venue.screen ? 0xd9dde3 : 0xf4f4f0 }),
+    ),
+  );
+  board.position.set(0, venue.screen ? venue.stageHeight + 3.1 : 1.6, H.front - 0.02);
+  board.rotation.y = Math.PI;
 
-  // Podium with a slanted top that faces the speaker.
-  const podiumH = 1.05;
-  const podium = add(new THREE.Mesh(new THREE.BoxGeometry(0.75, podiumH, 0.45), mat(PALETTE.podium)));
-  podium.position.set(0, R.stageHeight + podiumH / 2, -0.58);
-  const top = add(new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.04, 0.5), mat(PALETTE.podium)));
-  top.position.set(0, R.stageHeight + podiumH + 0.05, -0.55);
-  top.rotation.x = 0.45;
-  const podiumTop = new THREE.Object3D();
-  podiumTop.position.set(0, 0.025, 0);
-  podiumTop.rotation.x = -Math.PI / 2;
-  top.add(podiumTop);
+  // Reading anchor: podium top, or the near edge of the interview table.
+  const readingAnchor = new THREE.Object3D();
+  if (venue.podium) {
+    const podiumH = 1.05;
+    const podium = add(new THREE.Mesh(new THREE.BoxGeometry(0.75, podiumH, 0.45), mat(0x6b4f3a)));
+    podium.position.set(0, venue.stageHeight + podiumH / 2, -0.58);
+    const top = add(new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.04, 0.5), mat(0x6b4f3a)));
+    top.position.set(0, venue.stageHeight + podiumH + 0.05, -0.55);
+    top.rotation.x = 0.45; // tilts toward the speaker
+    readingAnchor.position.set(0, 0.025, 0);
+    readingAnchor.rotation.x = -Math.PI / 2;
+    top.add(readingAnchor);
+  }
+  if (venue.table) {
+    const tableH = 0.74;
+    const table = add(new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.05, 1.2), mat(0x8a6a4c)));
+    table.position.set(0, tableH, -1.05);
+    const legGeo = new THREE.BoxGeometry(0.06, tableH, 0.06);
+    for (const [x, z] of [[-1.3, -0.5], [1.3, -0.5], [-1.3, -1.6], [1.3, -1.6]]) {
+      const leg = add(new THREE.Mesh(legGeo, mat(0x3a3a3a)), false);
+      leg.position.set(x, tableH / 2, z);
+    }
+    readingAnchor.position.set(0, tableH + 0.03, -0.62);
+    readingAnchor.rotation.x = -Math.PI / 2;
+    group.add(readingAnchor);
+    // A framed picture on the back wall so the office isn't bare.
+    const art = add(new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.9), mat(0x6d8fa8)));
+    art.position.set(-1.8, 1.7, H.back + 0.02);
+  }
 
   // Stepped, curved rows and the seats on them.
-  const seats: Seat[] = [];
-  const seatOffsets: THREE.Matrix4[] = [];
-  const toRad = THREE.MathUtils.degToRad;
-  R.rowRadii.forEach((radius, row) => {
-    const floorY = row * R.rowRise;
-    const half = toRad(R.rowHalfSpanDeg[row]);
-    if (row > 0) {
-      add(new THREE.Mesh(rowPlatform(radius - 0.65, radius + 0.65, half + 0.12, floorY), mat(PALETTE.platform)));
-    }
-    const n = R.seatsPerRow[row];
-    for (let col = 0; col < n; col++) {
-      const a = -half + (2 * half * col) / (n - 1);
-      const position = new THREE.Vector3(radius * Math.sin(a), floorY, -radius * Math.cos(a));
-      const yaw = Math.atan2(-position.x, -position.z);
-      const azimuthDeg = THREE.MathUtils.radToDeg(a);
-      seats.push({ index: seats.length, row, col, position, yaw, azimuthDeg, section: sectionFor(row, azimuthDeg) });
-      seatOffsets.push(
-        new THREE.Matrix4().compose(position, new THREE.Quaternion().setFromAxisAngle(THREE.Object3D.DEFAULT_UP, yaw), new THREE.Vector3(1, 1, 1)),
-      );
-    }
+  const seats = layoutSeats(venue);
+  venue.rows.forEach((spec, row) => {
+    if (row === 0 || venue.rowRise === 0) return;
+    const half = THREE.MathUtils.degToRad(spec.halfSpanDeg) + 0.12;
+    const gap = (spec.radius - venue.rows[row - 1].radius) / 2;
+    add(new THREE.Mesh(rowPlatform(spec.radius - gap, spec.radius + gap, half, row * venue.rowRise), mat(0x2f2925)));
   });
 
-  // Chairs as two instanced meshes: one draw call each for all 30.
+  // Chairs as two instanced meshes: one draw call each for the whole room.
   const seatGeo = new THREE.BoxGeometry(0.5, 0.08, 0.48).translate(0, 0.44, 0);
   const backGeo = new THREE.BoxGeometry(0.5, 0.6, 0.06).translate(0, 0.72, -0.24);
+  const one = new THREE.Vector3(1, 1, 1);
   for (const geo of [seatGeo, backGeo]) {
-    const inst = new THREE.InstancedMesh(geo, mat(PALETTE.seat), seats.length);
-    seatOffsets.forEach((m, i) => inst.setMatrixAt(i, m));
+    const inst = new THREE.InstancedMesh(geo, mat(P.seat), seats.length);
+    seats.forEach((s, i) =>
+      inst.setMatrixAt(
+        i,
+        new THREE.Matrix4().compose(s.position, new THREE.Quaternion().setFromAxisAngle(THREE.Object3D.DEFAULT_UP, s.yaw), one),
+      ),
+    );
     add(inst, false);
   }
 
-  // Wall clock on the back wall, showing real time.
+  // Wall clock on the back wall, above the last row, showing real time.
+  const lastRowHead = (venue.rows.length - 1) * venue.rowRise + 1.4;
   const clock = new THREE.Group();
-  clock.position.set(0, 4.4, R.hallBack + 0.03);
-  const face = new THREE.Mesh(new THREE.CircleGeometry(0.42, 32), new THREE.MeshBasicMaterial({ color: PALETTE.clockFace }));
-  clock.add(face);
-  const handMat = new THREE.MeshBasicMaterial({ color: PALETTE.clockHand });
-  const hourHand = new THREE.Mesh(new THREE.PlaneGeometry(0.04, 0.22).translate(0, 0.11, 0.005), handMat);
-  const minuteHand = new THREE.Mesh(new THREE.PlaneGeometry(0.025, 0.34).translate(0, 0.17, 0.006), handMat);
+  clock.position.set(0, Math.min(H.height - 0.7, Math.max(lastRowHead + 1.2, 2.3)), H.back + 0.03);
+  clock.add(new THREE.Mesh(new THREE.CircleGeometry(0.4, 32), new THREE.MeshBasicMaterial({ color: 0xf2efe6 })));
+  const handMat = new THREE.MeshBasicMaterial({ color: 0x1a1a1a });
+  const hourHand = new THREE.Mesh(new THREE.PlaneGeometry(0.04, 0.2).translate(0, 0.1, 0.005), handMat);
+  const minuteHand = new THREE.Mesh(new THREE.PlaneGeometry(0.025, 0.32).translate(0, 0.16, 0.006), handMat);
   clock.add(hourHand, minuteHand);
   add(clock, false);
 
   return {
+    venue,
     group,
     seats,
+    eye: new THREE.Vector3(0, venue.stageHeight + venue.eyeHeight, 0),
     depthMeshes,
-    podiumTop,
+    readingAnchor,
     update(now: Date) {
       const m = now.getMinutes() + now.getSeconds() / 60;
       const h = (now.getHours() % 12) + m / 60;
       minuteHand.rotation.z = (-m / 60) * Math.PI * 2;
       hourHand.rotation.z = (-h / 12) * Math.PI * 2;
     },
+    dispose() {
+      group.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        const m = mesh.material as THREE.Material | THREE.Material[] | undefined;
+        if (Array.isArray(m)) m.forEach((x) => x.dispose());
+        else m?.dispose();
+      });
+    },
   };
-}
-
-/** Indices of the seats beside each seat in its row. */
-export function seatNeighbors(seats: readonly Seat[]): number[][] {
-  return seats.map((s) =>
-    seats.filter((o) => o.row === s.row && Math.abs(o.col - s.col) === 1).map((o) => o.index),
-  );
 }

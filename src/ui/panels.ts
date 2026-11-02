@@ -47,6 +47,20 @@ export class TextPanel {
     );
   }
 
+  /** Draw free-form content (e.g. a seat map) in canvas pixels; pxPerM converts metres. */
+  paint(fn: (ctx: CanvasRenderingContext2D, w: number, h: number, pxPerM: number) => void): void {
+    this.lastKey = '';
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    fn(this.ctx, this.canvas.width, this.canvas.height, PX_PER_M);
+    this.texture.needsUpdate = true;
+  }
+
+  /** Draw on top of everything: menus stay readable even if the room is in the way. */
+  setOverlay(on: boolean): void {
+    this.mesh.material.depthTest = !on;
+    this.mesh.renderOrder = on ? 800 : 0;
+  }
+
   setStyle(style: PanelStyle): void {
     this.style = { ...this.style, ...style };
     this.lastKey = '';
@@ -130,13 +144,14 @@ const BTN = {
 };
 
 export function makeButton(label: string, width: number, height: number, onSelect: () => void, size = 0.1): Button {
-  const panel = new TextPanel(width, height, { ...BTN.idle, radius: 0.05 });
+  const panel = new TextPanel(width, height, { ...BTN.idle, radius: 0.05, padding: 0.025 });
   let hover = false;
   let selected = false;
   const redraw = () => {
     panel.setStyle(selected ? BTN.selected : hover ? BTN.hover : BTN.idle);
     panel.draw([{ text: label, size, weight: 700 }]);
-    panel.mesh.scale.setScalar(hover ? 1.06 : 1);
+    // Layout may set a base scale (menus shrink in small rooms); hover grows on top of it.
+    panel.mesh.scale.setScalar((hover ? 1.06 : 1) * ((panel.mesh.userData.baseScale as number | undefined) ?? 1));
   };
   redraw();
   const button: Button = {
@@ -152,6 +167,7 @@ export function makeButton(label: string, width: number, height: number, onSelec
       redraw();
     },
   };
+  panel.setOverlay(true);
   panel.mesh.userData.button = button;
   return button;
 }

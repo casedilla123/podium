@@ -21,12 +21,19 @@ export class StereoRig {
     this.left = new THREE.PerspectiveCamera(CONFIG.stereo.eyeFovDeg, 1, R.near, R.far);
     this.right = new THREE.PerspectiveCamera(CONFIG.stereo.eyeFovDeg, 1, R.near, R.far);
     this.head.add(this.mono, this.left, this.right);
-    this.setIpd(CONFIG.stereo.ipd);
+    this.setIpd(CONFIG.stereo.ipdMm / 1000);
   }
 
   setIpd(ipd: number): void {
     this.left.position.x = -ipd / 2;
     this.right.position.x = ipd / 2;
+  }
+
+  /** Per-eye field of view (viewer fit) and the single-view field of view. */
+  setFov(eyeFovDeg: number, monoFovDeg: number): void {
+    this.left.fov = this.right.fov = eyeFovDeg;
+    this.mono.fov = monoFovDeg;
+    this.resize(this.width, this.height);
   }
 
   setStereo(on: boolean): void {

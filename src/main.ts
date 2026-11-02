@@ -3,33 +3,44 @@
 // Every frame, in order:
 //   1. Read the phone's rotation (or debug mouse-look) and set the head.
 //   2. Raycast from the centre of view: buttons, reticle depth, dwell.
-//   3. Gaze credit + voice + notes -> attention model.
+//   3. Gaze credit + voice + looking down -> attention model.
 //   4. Members' states and postures.
-//   5. (Day 6) Every 100 ms, log a sample for the report.
+//   5. Every 100 ms of talk, log a sample for the report.
 //   6. Render the left eye, then the right eye.
 
 import * as THREE from 'three';
-import { CONFIG, type Mood } from './config';
-import { Crowd } from './audience/crowd';
+import { CONFIG, MOODS, VENUES, type Mood, type VenueId } from './config';
 import { notesFactor, voiceFactor, type VoiceInput } from './audience/attention';
+import { Crowd } from './audience/crowd';
+import { Mic } from './audio/mic';
+import { SoundScape } from './audio/sound';
+import { noiseFloor, VoiceDetector, type VoiceState } from './audio/voice';
 import { Hud } from './debug/hud';
 import { DesktopLook } from './input/desktopLook';
 import { Gaze } from './input/gaze';
 import { OrientationControl, requestMotionPermission, yawOf } from './input/orientation';
 import { attachTap } from './input/tap';
 import { StereoRig } from './render/stereo';
-import { buildLighting } from './scene/lighting';
-import { buildRoom, EYE_Y } from './scene/room';
-import { makeButton, placeInRoom, TextPanel, type Button } from './ui/panels';
+import { buildLighting, type Lighting } from './scene/lighting';
+import { buildRoom, sectionLabel, SECTIONS, type Room, type Section } from './scene/room';
+import { loadHistory, loadLastSession, recordRun } from './session/history';
+import { computeMetrics, type Metrics } from './session/metrics';
+import { Recorder, type SessionData } from './session/recorder';
+import { loadSettings, saveSettings, type Settings } from './settings';
+import { buildSettings } from './ui/launch';
+import { makeButton, placeInRoom, TextPanel, type Button, type TextLine } from './ui/panels';
+import { clock, renderReport } from './ui/report';
+import { paintVrReport } from './ui/vrReport';
 
-type AppState = 'launch' | 'recenter' | 'setup' | 'countdown' | 'talk' | 'ended';
+type AppState = 'launch' | 'recenter' | 'setup' | 'countdown' | 'talk' | 'ended' | 'report';
 
-const NOTES_KEY = 'podium.notes';
 const params = new URLSearchParams(location.search);
 const forceDebug = params.has('debug');
 const isTouch = navigator.maxTouchPoints > 0;
 
-// ---------- Renderer and scene ----------
+let settings: Settings = loadSettings();
+
+// ---------- Renderer, rig, and the swappable venue ----------
 
 const container = document.getElementById('app')!;
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -40,16 +51,14 @@ container.append(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0d12);
 
-const room = buildRoom();
-const lighting = buildLighting();
-const crowd = new Crowd(room.seats, 7);
 const rig = new StereoRig();
-rig.head.position.set(0, EYE_Y, 0); // rotation only: this never changes
-scene.add(room.group, lighting.group, crowd.group, rig.head);
-
+scene.add(rig.head);
 const gaze = new Gaze();
-gaze.depthMeshes = [...room.depthMeshes, ...crowd.depthMeshes];
 scene.add(gaze.reticle);
+
+let room: Room;
+let lighting: Lighting;
+let crowd: Crowd;
 
 // Gaze-credit cone outline for debug (G): the 12° circle at 3 m.
 const coneR = 3 * Math.tan(THREE.MathUtils.degToRad(CONFIG.gaze.creditConeDeg));
@@ -72,86 +81,134 @@ function resize(): void {
 window.addEventListener('resize', resize);
 resize();
 
-// ---------- In-world UI ----------
+// ---------- In-world UI (built once, laid out per venue) ----------
 
-const eye = rig.head.position.clone();
-const panelStyle = { background: 'rgba(16,19,28,0.86)', border: 'rgba(255,255,255,0.18)', radius: 0.06 };
+const panelStyle = { background: 'rgba(16,19,28,0.88)', border: 'rgba(255,255,255,0.18)', radius: 0.06 };
 
 const recenterSign = new TextPanel(2.0, 0.75, panelStyle);
-placeInRoom(recenterSign.mesh, eye, 3.2, 0, 4);
+const setupTitle = new TextPanel(2.2, 0.3);
+const countdownPanel = new TextPanel(1.4, 1.0, panelStyle);
+const hintPanel = new TextPanel(2.0, 0.32, { background: 'rgba(16,19,28,0.75)', radius: 0.05 });
+const vrReport = new TextPanel(2.5, 1.45);
+// Timer and mic meter on the podium (or the interview table).
+const podiumPanel = new TextPanel(0.74, 0.46, { background: 'rgba(12,14,20,0.92)', radius: 0.02, align: 'left', padding: 0.035 });
+for (const p of [recenterSign, setupTitle, countdownPanel, hintPanel, vrReport]) p.setOverlay(true);
 
-const setupTitle = new TextPanel(1.9, 0.34);
-setupTitle.draw([{ text: 'Set up your talk', size: 0.13, weight: 700 }]);
-placeInRoom(setupTitle.mesh, eye, 2.8, 0, 19);
-
-let talkMinutes: number = CONFIG.talk.lengthsMin[1];
-let mood: Mood = 'neutral';
-
-const BTN_W = 0.56;
-const BTN_H = 0.22;
-const COLS = [-14, 0, 14];
-const lengthButtons = CONFIG.talk.lengthsMin.map((min, i) => {
-  const b = makeButton(`${min} min`, BTN_W, BTN_H, () => {
-    talkMinutes = min;
-    refreshSetup();
-  });
-  placeInRoom(b.mesh, eye, 2.6, COLS[i], 8);
-  return { b, min };
-});
-const moodButtons = (['friendly', 'neutral', 'tough'] as const).map((m, i) => {
-  const b = makeButton(m[0].toUpperCase() + m.slice(1), BTN_W, BTN_H, () => {
-    mood = m;
-    refreshSetup();
-  });
-  placeInRoom(b.mesh, eye, 2.6, COLS[i], -2);
-  return { b, m };
-});
-const beginButton = makeButton('Begin', 0.7, 0.24, () => go('countdown'), 0.12);
-placeInRoom(beginButton.mesh, eye, 2.6, 0, -13);
-
-function refreshSetup(): void {
-  lengthButtons.forEach(({ b, min }) => b.setSelected(min === talkMinutes));
-  moodButtons.forEach(({ b, m }) => b.setSelected(m === mood));
-}
-refreshSetup();
-
-const countdownPanel = new TextPanel(1.2, 0.9);
-placeInRoom(countdownPanel.mesh, eye, 3.5, 0, 10);
-
+const venueButtons = (Object.keys(VENUES) as VenueId[]).map((id) => ({
+  id,
+  b: makeButton(VENUES[id].name, 0.6, 0.2, () => changeSettings({ venue: id }), 0.075),
+}));
+const moodButtons = (Object.keys(MOODS) as Mood[]).map((m) => ({
+  m,
+  b: makeButton(MOODS[m].name, 0.6, 0.2, () => changeSettings({ mood: m }), 0.08),
+}));
+const lengthButtons = CONFIG.talk.lengthsMin.map((min) => ({
+  min,
+  b: makeButton(`${min} min`, 0.6, 0.2, () => changeSettings({ lengthMin: min }), 0.08),
+}));
+const beginButton = makeButton('Begin', 0.8, 0.24, () => go('countdown'), 0.12);
+const exitButton = makeButton('Exit', 0.5, 0.16, () => exitToPage('launch'), 0.065);
 // Above the audience so looking at people never triggers it.
 const endButton = makeButton('End talk?', 0.8, 0.26, () => go('ended'), 0.12);
-placeInRoom(endButton.mesh, eye, 2.6, 0, 28);
-
-const summaryPanel = new TextPanel(2.2, 1.25, panelStyle);
-placeInRoom(summaryPanel.mesh, eye, 3.0, 0, 9);
-const againButton = makeButton('Again', 0.6, 0.22, () => go('setup'));
-placeInRoom(againButton.mesh, eye, 2.6, 0, -11);
-
-// Timer and notes on the slanted podium top.
-const podiumPanel = new TextPanel(0.74, 0.46, { background: 'rgba(12,14,20,0.92)', radius: 0.02, align: 'left', padding: 0.03 });
-room.podiumTop.add(podiumPanel.mesh);
+const againButton = makeButton('Again', 0.6, 0.22, () => go('setup'), 0.09);
+const fullReportButton = makeButton('Full report', 0.6, 0.22, () => exitToPage('report'), 0.08);
 
 const allButtons: Button[] = [
-  ...lengthButtons.map((x) => x.b),
+  ...venueButtons.map((x) => x.b),
   ...moodButtons.map((x) => x.b),
+  ...lengthButtons.map((x) => x.b),
   beginButton,
+  exitButton,
   endButton,
   againButton,
+  fullReportButton,
 ];
 gaze.buttons = allButtons;
-scene.add(
-  recenterSign.mesh,
-  setupTitle.mesh,
-  countdownPanel.mesh,
-  summaryPanel.mesh,
-  ...allButtons.map((b) => b.mesh),
-);
+scene.add(recenterSign.mesh, setupTitle.mesh, countdownPanel.mesh, hintPanel.mesh, vrReport.mesh, ...allButtons.map((b) => b.mesh));
+
+/** Place menus for the current venue. Small rooms pull menus closer and shrink them to the same angular size. */
+function layoutUI(): void {
+  const eye = room.eye;
+  const D = room.venue.uiDistance;
+  const k = D / 2.6;
+  const put = (o: THREE.Object3D, yaw: number, pitch: number, dist = D) => {
+    placeInRoom(o, eye, dist, yaw, pitch);
+    o.userData.baseScale = k;
+    o.scale.setScalar(k);
+  };
+  put(recenterSign.mesh, 0, 4, D + 0.4);
+  put(setupTitle.mesh, 0, 25);
+  const row4 = [-22.5, -7.5, 7.5, 22.5];
+  venueButtons.forEach(({ b }, i) => put(b.mesh, row4[i], 15));
+  moodButtons.forEach(({ b }, i) => put(b.mesh, [-15, 0, 15][i], 5));
+  lengthButtons.forEach(({ b }, i) => put(b.mesh, row4[i], -5));
+  put(beginButton.mesh, 0, -16);
+  put(exitButton.mesh, 0, -25);
+  put(countdownPanel.mesh, 0, 8, D + 0.6);
+  put(hintPanel.mesh, 0, 22, D + 0.6);
+  put(endButton.mesh, 0, 30);
+  put(vrReport.mesh, 0, 9, D + 0.3);
+  put(againButton.mesh, -9, -17);
+  put(fullReportButton.mesh, 9, -17);
+}
+
+function refreshSetupButtons(): void {
+  venueButtons.forEach(({ id, b }) => b.setSelected(id === settings.venue));
+  moodButtons.forEach(({ m, b }) => b.setSelected(m === settings.mood));
+  lengthButtons.forEach(({ min, b }) => b.setSelected(min === settings.lengthMin));
+}
+
+// ---------- Audio ----------
+
+let sound: SoundScape | null = null;
+let mic: Mic | null = null;
+const voice = new VoiceDetector(CONFIG.voice);
+let voiceState: VoiceState = { speaking: false, silenceSeconds: 0, quiet: false, levelDb: -100 };
+let micAcc = 0;
+const calibration: number[] = [];
+
+// ---------- Venue ----------
+
+function setVenue(id: VenueId): void {
+  if (room) {
+    scene.remove(room.group, lighting.group, crowd.group);
+    room.dispose();
+    crowd.dispose();
+  }
+  room = buildRoom(VENUES[id]);
+  lighting = buildLighting(room.venue);
+  crowd = new Crowd(room.seats, room.eye, 7);
+  crowd.attentionColors = settings.attentionColors;
+  crowd.setMood(settings.mood);
+  crowd.onSound = (i, kind) => {
+    if (state === 'talk') sound?.[kind](i);
+  };
+  scene.add(room.group, lighting.group, crowd.group);
+  rig.head.position.copy(room.eye); // rotation only: never changes during a run
+  gaze.depthMeshes = [...room.depthMeshes, ...crowd.depthMeshes];
+  room.readingAnchor.add(podiumPanel.mesh);
+  sound?.setSeats(crowd.headPositions);
+  layoutUI();
+}
+
+function changeSettings(patch: Partial<Settings>): void {
+  const venueChanged = patch.venue !== undefined && patch.venue !== settings.venue;
+  settings = { ...settings, ...patch };
+  saveSettings(settings);
+  launchSettings.set(settings);
+  if (venueChanged) setVenue(settings.venue);
+  crowd.setMood(settings.mood);
+  crowd.attentionColors = settings.attentionColors;
+  sound?.setEnabled(settings.sound);
+  refreshSetupButtons();
+}
 
 // ---------- Input ----------
 
 const orientation = new OrientationControl();
 const look = new DesktopLook();
 let useSensor = false;
+let sensorTried = false;
 let debug = forceDebug || !isTouch;
 
 function recenter(): void {
@@ -159,8 +216,10 @@ function recenter(): void {
   else look.recenter();
 }
 
+let endConfirmLeft = 0;
 attachTap(renderer.domElement, {
   onTap() {
+    sound?.resume();
     if (gaze.tap()) return;
     if (state === 'recenter') {
       recenter();
@@ -181,7 +240,7 @@ let fakeSpeaking = false;
 let fakeVoiceActive = false;
 
 window.addEventListener('keydown', (e) => {
-  if (state === 'launch' || e.repeat) return;
+  if (state === 'launch' || state === 'report' || e.repeat) return;
   switch (e.key.toLowerCase()) {
     case 's':
       rig.setStereo(!rig.stereo);
@@ -224,55 +283,127 @@ async function keepAwake(): Promise<void> {
   }
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state !== 'launch') void keepAwake();
-});
-
-// ---------- Launch screen ----------
-
-const launchEl = document.getElementById('launch')!;
-const notesEl = document.getElementById('notes') as HTMLTextAreaElement;
-const statusEl = document.getElementById('status')!;
-const startEl = document.getElementById('start') as HTMLButtonElement;
-
-try {
-  notesEl.value = localStorage.getItem(NOTES_KEY) ?? '';
-} catch {
-  // Storage blocked: notes just won't persist.
-}
-notesEl.addEventListener('input', () => {
-  try {
-    localStorage.setItem(NOTES_KEY, notesEl.value);
-  } catch {
-    // ignore
+  if (document.visibilityState === 'visible' && state !== 'launch' && state !== 'report') {
+    void keepAwake();
+    sound?.resume();
   }
 });
 
-startEl.addEventListener('click', () => {
-  // iOS grants motion access only inside the tap: ask first, before any await.
-  const motion = forceDebug || !isTouch ? Promise.resolve(false) : requestMotionPermission();
-  startEl.disabled = true;
+// ---------- 2D pages: launch / settings and the report ----------
+
+const launchEl = document.getElementById('launch')!;
+const reportEl = document.getElementById('report')!;
+const reportBody = document.getElementById('report-body')!;
+const statusEl = document.getElementById('status')!;
+const startEl = document.getElementById('start') as HTMLButtonElement;
+const lastReportEl = document.getElementById('last-report') as HTMLButtonElement;
+const exitEl = document.getElementById('exit') as HTMLButtonElement;
+
+const launchSettings = buildSettings(document.getElementById('settings')!, settings, (s) => {
+  const venueChanged = s.venue !== settings.venue;
+  settings = s;
+  saveSettings(s);
+  if (venueChanged) setVenue(s.venue);
+});
+
+function refreshLastReportButton(): void {
+  lastReportEl.hidden = loadHistory().length === 0;
+}
+
+lastReportEl.addEventListener('click', () => {
+  const d = loadLastSession();
+  if (!d) return;
+  showReport(d, computeMetrics(d), loadHistory().slice(1));
+});
+
+/**
+ * Start (or restart) the VR part. Must run inside a tap: iOS grants motion
+ * access and starts audio only from a user gesture, so ask before any await.
+ */
+function startVR(button: HTMLButtonElement): void {
+  const wantSensor = !forceDebug && isTouch && !sensorTried;
+  const motion = wantSensor ? requestMotionPermission() : Promise.resolve(useSensor);
+  if (!sound) sound = new SoundScape(settings.mic);
+  sound.resume();
+  sound.setEnabled(settings.sound);
+  sound.setSeats(crowd.headPositions);
+  button.disabled = true;
   statusEl.textContent = 'Starting…';
+
   void motion.then(async (granted) => {
-    if (granted) {
-      orientation.start();
-      useSensor = await orientation.waitForData();
+    if (wantSensor) {
+      sensorTried = true;
+      if (granted) {
+        orientation.start();
+        useSensor = await orientation.waitForData();
+      }
+      if (!useSensor) {
+        debug = true;
+        statusEl.textContent = 'No motion sensor access: drag to look around.';
+      }
     }
-    if (!useSensor) {
-      debug = true;
-      if (isTouch && !forceDebug) statusEl.textContent = 'No motion sensor access: drag to look around.';
+    if (settings.mic && !mic) {
+      try {
+        mic = await Mic.open(sound!.ctx);
+      } catch {
+        statusEl.textContent = 'Microphone blocked: the room will ignore your voice this time.';
+      }
     }
-    if (useSensor) orientation.recenter();
+    button.disabled = false;
     enterVR();
   });
-});
+}
+
+startEl.addEventListener('click', () => startVR(startEl));
+exitEl.addEventListener('click', () => exitToPage('launch'));
 
 function enterVR(): void {
   launchEl.hidden = true;
+  reportEl.hidden = true;
+  const cardboard = settings.view === 'cardboard';
   document.body.classList.add('vr');
-  rig.setStereo(useSensor);
+  document.body.classList.toggle('cardboard', cardboard);
+  rig.setIpd(settings.ipdMm / 1000);
+  rig.setFov(settings.fovDeg, useSensor && !cardboard ? CONFIG.render.handheldFovDeg : CONFIG.render.monoFovDeg);
+  rig.setStereo(useSensor && cardboard);
+  exitEl.hidden = rig.stereo;
   helpEl.hidden = !debug;
+  crowd.attentionColors = settings.attentionColors;
+  crowd.setMood(settings.mood);
+  if (settings.sound) sound?.startRoomTone();
   void keepAwake();
   go('recenter');
+}
+
+function exitToPage(page: 'launch' | 'report'): void {
+  document.body.classList.remove('vr', 'cardboard');
+  rig.setStereo(false);
+  exitEl.hidden = true;
+  helpEl.hidden = true;
+  hidePanels();
+  // Let the applause finish, then fade the room out behind the 2D page.
+  window.setTimeout(() => {
+    if (state === 'launch' || state === 'report') sound?.setEnabled(false);
+  }, 2500);
+  if (page === 'report' && lastRun) showReport(lastRun.data, lastRun.metrics, lastRun.previous);
+  else {
+    state = 'launch';
+    statusEl.textContent = '';
+    refreshLastReportButton();
+    launchEl.hidden = false;
+    reportEl.hidden = true;
+  }
+}
+
+function showReport(d: SessionData, m: Metrics, previous: ReturnType<typeof loadHistory>): void {
+  state = 'report';
+  launchEl.hidden = true;
+  reportEl.hidden = false;
+  reportEl.scrollTop = 0;
+  renderReport(reportBody, d, m, previous, {
+    onAgain: () => startVR(reportBody.querySelector('#rp-again') as HTMLButtonElement),
+    onSettings: () => exitToPage('launch'),
+  });
 }
 
 // ---------- State machine ----------
@@ -281,79 +412,118 @@ let state: AppState = 'launch';
 let countdownLeft = 0;
 let talkElapsed = 0;
 let talkLength = 0;
-let endConfirmLeft = 0;
-let silenceSeconds = 0;
-let notesStretch = 0;
-let notesTotal = 0;
+let downStretch = 0;
+let recorder: Recorder | null = null;
+let lastSeen: Partial<Record<Section, number>> = {};
+let lastRun: { data: SessionData; metrics: Metrics; previous: ReturnType<typeof loadHistory> } | null = null;
+
+function hidePanels(): void {
+  for (const o of [recenterSign.mesh, setupTitle.mesh, countdownPanel.mesh, hintPanel.mesh, vrReport.mesh, ...allButtons.map((b) => b.mesh)]) {
+    o.visible = false;
+  }
+}
 
 function go(next: AppState): void {
   state = next;
-  const show = (on: boolean, ...objs: { visible: boolean }[]) => objs.forEach((o) => (o.visible = on));
-
-  show(next === 'recenter', recenterSign.mesh);
-  show(next === 'setup', setupTitle.mesh, beginButton.mesh, ...lengthButtons.map((x) => x.b.mesh), ...moodButtons.map((x) => x.b.mesh));
-  show(next === 'countdown', countdownPanel.mesh);
-  show(false, endButton.mesh);
-  show(next === 'ended', summaryPanel.mesh, againButton.mesh);
+  hidePanels();
+  const show = (...objs: THREE.Object3D[]) => objs.forEach((o) => (o.visible = true));
 
   switch (next) {
-    case 'recenter':
+    case 'recenter': {
+      const handheld = settings.view === 'handheld' || !useSensor;
       recenterSign.draw([
-        { text: useSensor ? 'Put your phone in the viewer.' : 'Debug mode', size: 0.08, color: '#aab3c5' },
-        { text: 'Look at the podium and tap', size: 0.13, weight: 700 },
-        { text: useSensor ? 'Press the viewer button' : 'Click to continue · drag to look', size: 0.075, color: '#aab3c5' },
+        { text: useSensor ? (handheld ? 'Hold your phone up in front of you.' : 'Put your phone in the viewer.') : 'Debug mode', size: 0.08, color: '#aab3c5' },
+        { text: room.venue.podium ? 'Look at the podium and tap' : 'Look at the panel and tap', size: 0.13, weight: 700 },
+        { text: useSensor ? (handheld ? 'Tap the screen' : 'Press the viewer button') : 'Click to continue · drag to look', size: 0.075, color: '#aab3c5' },
       ]);
+      show(recenterSign.mesh);
       lighting.setHouseTarget(CONFIG.lighting.houseUp);
       break;
+    }
     case 'setup':
       crowd.reset();
+      refreshSetupButtons();
+      setupTitle.draw([{ text: 'Choose your room, audience, and time', size: 0.1, weight: 700 }]);
+      show(setupTitle.mesh, beginButton.mesh, exitButton.mesh, ...venueButtons.map((x) => x.b.mesh), ...moodButtons.map((x) => x.b.mesh), ...lengthButtons.map((x) => x.b.mesh));
       lighting.setHouseTarget(CONFIG.lighting.houseUp);
       break;
     case 'countdown':
-      crowd.setMood(mood);
+      crowd.setMood(settings.mood);
       crowd.reset();
       countdownLeft = CONFIG.talk.countdownSeconds;
+      calibration.length = 0;
+      show(countdownPanel.mesh);
       lighting.setHouseTarget(CONFIG.lighting.houseDim);
       break;
     case 'talk':
       talkElapsed = 0;
-      talkLength = talkMinutes * 60;
-      silenceSeconds = 0;
-      notesStretch = 0;
-      notesTotal = 0;
+      talkLength = settings.lengthMin * 60;
+      downStretch = 0;
+      lastSeen = {};
+      if (mic) voice.floorDb = noiseFloor(calibration, CONFIG.voice.floorMinDb);
+      recorder = new Recorder({
+        venue: room.venue.id,
+        mood: settings.mood,
+        lengthMin: settings.lengthMin,
+        seats: room.seats.map((s) => ({ section: s.section, row: s.row, x: s.position.x, z: s.position.z })),
+      });
       void keepAwake();
       break;
     case 'ended': {
       lighting.setHouseTarget(CONFIG.lighting.houseUp);
-      const avg = crowd.averageInterest();
-      const notesPct = talkElapsed > 0 ? (100 * notesTotal) / talkElapsed : 0;
-      summaryPanel.draw([
-        { text: talkElapsed >= talkLength ? "Time's up" : 'Talk ended', size: 0.14, weight: 700 },
-        { text: `${formatTime(talkElapsed)} spoken to a ${mood} room`, size: 0.075, color: '#aab3c5' },
-        { text: ' ', size: 0.04 },
-        { text: `Room interest at the end: ${Math.round(avg * 100)}%`, size: 0.09 },
-        { text: `Still engaged: ${crowd.countIn('engaged')} of ${crowd.members.length}`, size: 0.09 },
-        { text: `Time on notes: ${Math.round(notesPct)}%`, size: 0.09 },
-        { text: ' ', size: 0.04 },
-        { text: 'Full report arrives on Day 6', size: 0.06, color: '#7d8597' },
-      ]);
+      if (!recorder) break;
+      const data = recorder.finish(crowd.members.map((m) => m.interest));
+      const metrics = computeMetrics(data);
+      const previous = recordRun(data, metrics);
+      lastRun = { data, metrics, previous };
+      recorder = null;
+      vrReport.paint((ctx, w, h, px) => paintVrReport(ctx, w, h, px, data, metrics, talkElapsed >= talkLength));
+      show(vrReport.mesh, againButton.mesh, fullReportButton.mesh);
+      if (settings.sound) sound?.applause(crowd.members.map((m) => m.state));
       break;
     }
   }
 }
 
-function formatTime(s: number): string {
-  const t = Math.max(0, Math.ceil(s));
-  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+function drawPodium(): void {
+  const lines: TextLine[] = [];
+  if (state === 'talk') {
+    const left = talkLength - talkElapsed;
+    lines.push({ text: clock(left), size: 0.11, weight: 700, color: left < 30 ? '#ffb347' : '#fff' });
+  } else {
+    lines.push({ text: state === 'countdown' ? 'Get ready' : 'Podium', size: 0.07, weight: 700, color: '#aab3c5' });
+  }
+  if (mic) {
+    const bars = Math.max(0, Math.min(10, Math.round((voiceState.levelDb - voice.floorDb) / 4)));
+    lines.push({ text: `Mic ${'▮'.repeat(bars)}${'▯'.repeat(10 - bars)}`, size: 0.04, weight: 600, color: voiceState.speaking ? '#7ee2a8' : '#7d8597' });
+  } else if (fakeVoiceActive) {
+    lines.push({ text: fakeSpeaking ? 'Speaking (Space)' : 'Silent', size: 0.04, weight: 600, color: '#7d8597' });
+  }
+  lines.push({ text: `${room.venue.name} · ${MOODS[settings.mood].name}`, size: 0.035, weight: 400, color: '#7d8597' });
+  podiumPanel.draw(lines);
 }
 
-function drawPodium(): void {
-  const notes = notesEl.value.trim();
-  const head =
-    state === 'talk'
-      ? { text: formatTime(talkLength - talkElapsed), size: 0.085, weight: 700 as const, color: talkLength - talkElapsed < 30 ? '#ffb347' : '#fff' }
-      : { text: state === 'countdown' ? 'Get ready' : 'Podium', size: 0.06, weight: 700 as const, color: '#aab3c5' };
-  podiumPanel.draw([head, { text: notes || 'No notes. Add some on the launch screen.', size: 0.034, weight: 400, color: '#d6dae3' }]);
+/** One short coaching hint during the talk, most urgent first. */
+function currentHint(v: VoiceInput): string {
+  if (!settings.hints) return '';
+  if (v.active && !v.speaking && v.silenceSeconds > CONFIG.hints.deadAirSeconds) return 'Keep talking: the room is waiting';
+  if (v.active && v.quiet) return 'Speak up a little';
+  if (downStretch > 4) return 'Look up at your audience';
+  const single = room.venue.rows.length === 1;
+  let worst: Section | null = null;
+  let worstFor = 0;
+  for (const sec of SECTIONS) {
+    if (!room.seats.some((s) => s.section === sec)) continue;
+    const since = talkElapsed - (lastSeen[sec] ?? 0);
+    if (since > worstFor) {
+      worst = sec;
+      worstFor = since;
+    }
+  }
+  if (worst && worstFor > CONFIG.hints.blindSpotSeconds) {
+    return `Don't forget the ${sectionLabel(worst, single).toLowerCase()}${single ? ' side' : ''}`;
+  }
+  return '';
 }
 
 // ---------- Frame loop ----------
@@ -365,6 +535,8 @@ let simTime = 0;
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
+  // Nothing to draw behind a 2D page: save the battery.
+  if (state === 'launch' || state === 'report') return;
   const simDt = dt * (fast ? CONFIG.debug.timeScaleFast : 1);
   simTime += simDt;
 
@@ -372,32 +544,59 @@ function frame(now: number): void {
   if (useSensor) orientation.update(dt, rig.head.quaternion);
   else look.update(rig.head.quaternion);
   rig.head.updateMatrixWorld();
+  sound?.setListener(room.eye, rig.head.quaternion);
 
-  // 2. Gaze: buttons, dwell, reticle. Hidden while on the launch screen.
-  gaze.reticle.visible = state !== 'launch';
+  // 2. Gaze: buttons, dwell, reticle.
   gaze.update(dt, rig.head);
   forward.set(0, 0, -1).applyQuaternion(rig.head.quaternion);
-  crowd.computeCredits(eye, forward);
+  const credits = crowd.computeCredits(room.eye, forward);
 
-  // 3. Talk clock, voice, notes -> room decay factor.
+  // Mic at 20 Hz (real time, not sped up).
+  if (mic) {
+    micAcc += dt;
+    const step = 1 / CONFIG.voice.sampleHz;
+    while (micAcc >= step) {
+      micAcc -= step;
+      const db = mic.levelDb();
+      if (state === 'countdown') calibration.push(db);
+      voiceState = voice.update(db, step);
+    }
+  }
+
+  // 3. Talk clock, voice, looking down -> room decay factor.
   let roomFactor = 1;
   if (state === 'countdown') {
     countdownLeft -= simDt;
-    countdownPanel.draw([{ text: String(Math.max(1, Math.ceil(countdownLeft))), size: 0.6, weight: 700 }]);
+    countdownPanel.draw([
+      { text: mic ? 'Stay quiet a moment…' : 'Get ready', size: 0.09, color: '#aab3c5' },
+      { text: String(Math.max(1, Math.ceil(countdownLeft))), size: 0.48, weight: 700 },
+      { text: `${room.venue.name} · ${MOODS[settings.mood].name} · ${settings.lengthMin} min`, size: 0.07, color: '#aab3c5' },
+    ]);
     if (countdownLeft <= 0) go('talk');
   } else if (state === 'talk') {
     talkElapsed += simDt;
-    silenceSeconds = fakeSpeaking ? 0 : silenceSeconds + simDt;
-    const voice: VoiceInput = { active: fakeVoiceActive, speaking: fakeSpeaking, silenceSeconds, quiet: false };
+    const v: VoiceInput =
+      fakeVoiceActive && (!mic || fakeSpeaking)
+        ? { active: true, speaking: fakeSpeaking, silenceSeconds: fakeSpeaking ? 0 : voiceState.silenceSeconds + simDt, quiet: false }
+        : { active: !!mic, speaking: voiceState.speaking, silenceSeconds: voiceState.silenceSeconds, quiet: voiceState.quiet };
+    if (fakeVoiceActive && !mic) voiceState = { ...voiceState, speaking: v.speaking, silenceSeconds: v.silenceSeconds };
 
     const pitch = THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(forward.y, -1, 1)));
     const yaw = THREE.MathUtils.radToDeg(yawOf(rig.head.quaternion));
-    const onNotes = pitch < CONFIG.gaze.notesPitchDeg && Math.abs(yaw) < CONFIG.gaze.notesYawHalfDeg;
-    notesStretch = onNotes ? notesStretch + simDt : 0;
-    if (onNotes) notesTotal += simDt;
+    const down = pitch < CONFIG.gaze.downPitchDeg && Math.abs(yaw) < CONFIG.gaze.downYawHalfDeg;
+    downStretch = down ? downStretch + simDt : 0;
 
     const A = CONFIG.attention;
-    roomFactor = voiceFactor(voice, A.voice) * notesFactor(notesStretch, A.notesGraceSeconds, A.notesFactor);
+    roomFactor = voiceFactor(v, A.voice) * notesFactor(downStretch, A.downGraceSeconds, A.downFactor);
+
+    credits.forEach((c, i) => {
+      if (c >= CONFIG.recorder.lookCredit) lastSeen[room.seats[i].section] = talkElapsed;
+    });
+    recorder?.update(simDt, credits, down, v.active ? v.speaking : null, crowd.averageInterest());
+
+    const hint = currentHint(v);
+    hintPanel.mesh.visible = hint !== '';
+    if (hint) hintPanel.draw([{ text: hint, size: 0.085, weight: 600, color: '#ffe2a8' }]);
 
     if (endButton.mesh.visible) {
       endConfirmLeft -= dt;
@@ -418,15 +617,32 @@ function frame(now: number): void {
 
   if (debug) {
     helpEl.textContent =
-      `${state} · ${mood} · room ${(crowd.averageInterest() * 100).toFixed(0)}% · decay ×${roomFactor.toFixed(2)}` +
-      `${fast ? ' · 4× time' : ''}${fakeSpeaking ? ' · speaking' : fakeVoiceActive ? ` · silent ${silenceSeconds.toFixed(0)}s` : ''}\n` +
+      `${state} · ${room.venue.name} · ${settings.mood} · room ${(crowd.averageInterest() * 100).toFixed(0)}% · decay ×${roomFactor.toFixed(2)}` +
+      `${fast ? ' · 4× time' : ''}${fakeSpeaking ? ' · speaking' : fakeVoiceActive ? ` · silent ${voiceState.silenceSeconds.toFixed(0)}s` : ''}\n` +
       'drag look · click tap · R recenter · S stereo · G gaze · I bars · P perf · Space speak · T 4×';
   }
-  hud.update(dt, renderer, `state ${state}`);
+  hud.update(dt, renderer, `state ${state} · ${crowd.members.length} people`);
 }
 
-go('launch');
+setVenue(settings.venue);
+hidePanels();
+refreshLastReportButton();
 renderer.setAnimationLoop(frame);
 
 // Console hook for debug mode, so checks can be scripted: podium.look.yaw = 0.3, podium.go('talk').
-if (debug) Object.assign(window, { podium: { look, crowd, go, rig, get state() { return state; } } });
+if (debug) {
+  Object.assign(window, {
+    podium: {
+      look,
+      go,
+      rig,
+      changeSettings,
+      get crowd() {
+        return crowd;
+      },
+      get state() {
+        return state;
+      },
+    },
+  });
+}

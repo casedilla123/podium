@@ -31,13 +31,15 @@ npm run dev | npm test | npm run build | npm run deploy
   unclear, ask me one question instead of guessing.
 
 ## Status
-Session 1 (Nov 1, 2026): Days 1-3 scaffold.
-- Works: project setup, lecture hall from simple shapes, desktop mouse-look,
-  phone-rotation camera with recenter, side-by-side stereo, reticle + gaze
-  raycast + dwell select + tap, launch screen with motion permission, wake
-  lock, Home Screen manifest, 30 instanced capsule audience members driven
-  by the unit-tested attention model, state colors/postures, "caught" snap,
-  debug overlays (S G I Space T P R), talk flow with timer and End-talk confirm.
-- Not yet: mic (Day 5), recorder/metrics/report (Day 6), real characters (Day 4),
-  lens distortion (Day 7), sounds, app icon PNG.
-- Next: check Day 1-2 "done when" on the phone, then Day 4 art pass.
+Session 2 (Nov 2, 2026): class-demo build. Deliberately off the outline's day order.
+- Venues (config.ts VENUES): Classroom 12, Lecture Hall 30, Auditorium 62, Interview panel 3 (seated, table).
+- Settings (src/settings.ts, launch screen + in-VR gaze menu): venue, mood, length 1/2/3/5 min, mic,
+  room sound, attention colours, coaching hints, Cardboard vs hand-held view, lens spacing, FOV.
+- Mic: volume-only speaking detection (audio/voice.ts, tested), noise floor calibrated during the countdown.
+- Sound: procedural 3D room tone, coughs, whispers, creaks, applause scaled by engagement (audio/sound.ts).
+- Recorder + metrics (session/, tested) -> in-VR summary with seat map, 2D report page with heatmap,
+  interest timeline, all metrics, comparison with last run. History in localStorage.
+- Audience: arms, clothes or attention colours, phone in hand when checked out.
+- Talk notes on the podium were removed on purpose (user: not needed yet). Podium shows timer + mic meter.
+- Not yet: real glTF characters, lens distortion, speech-to-text pace, slides.
+- Deployed: https://casedilla123.github.io/podium/ (push to main redeploys).

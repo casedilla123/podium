@@ -1,8 +1,8 @@
-// Warm key light on the stage, soft ambient fill, dim house. No shadows yet:
-// the budget allows one shadow-casting light at most and we spend it later if at all.
+// Warm key light on the speaker, soft ambient fill, dimmable house. No shadows:
+// the budget allows one shadow-casting light at most and we haven't needed it.
 
 import * as THREE from 'three';
-import { CONFIG } from '../config';
+import { CONFIG, type VenueSpec } from '../config';
 
 export interface Lighting {
   group: THREE.Group;
@@ -11,22 +11,23 @@ export interface Lighting {
   update(dt: number): void;
 }
 
-export function buildLighting(): Lighting {
+export function buildLighting(venue: VenueSpec): Lighting {
   const group = new THREE.Group();
+  const H = venue.hall;
 
   const ambient = new THREE.HemisphereLight(0xfff1dc, 0x2a2226, 1.1);
   group.add(ambient);
 
-  // Overhead fill on the audience so faces read from the stage.
+  // Overhead fill on the audience so faces read from the front.
   const houseFill = new THREE.DirectionalLight(0xffe2c0, 1.1);
-  houseFill.position.set(0, 6, 2);
-  houseFill.target.position.set(0, 0, -6);
+  houseFill.position.set(0, H.height, 2);
+  houseFill.target.position.set(0, 0, H.back * 0.6);
   group.add(houseFill, houseFill.target);
 
-  // Warm key light on the stage and podium.
-  const key = new THREE.SpotLight(0xffc98a, 30, 14, THREE.MathUtils.degToRad(35), 0.6, 1.5);
-  key.position.set(0, 6, -3);
-  key.target.position.set(0, 0.5, 0);
+  // Warm key light on the speaker's area.
+  const key = new THREE.SpotLight(0xffc98a, 30, H.height + 10, THREE.MathUtils.degToRad(35), 0.6, 1.5);
+  key.position.set(0, H.height - 0.3, -3);
+  key.target.position.set(0, venue.stageHeight, 0);
   group.add(key, key.target);
 
   const base = { ambient: ambient.intensity, fill: houseFill.intensity };
