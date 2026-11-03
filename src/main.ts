@@ -385,7 +385,7 @@ function enterVR(): void {
   const cardboard = settings.view === 'cardboard';
   document.body.classList.add('vr');
   document.body.classList.toggle('cardboard', cardboard);
-  rig.setIpd(settings.ipdMm / 1000);
+  rig.setLensSpacing(settings.ipdMm, isTouch && !forceDebug);
   rig.setFov(settings.fovDeg, useSensor && !cardboard ? CONFIG.render.handheldFovDeg : CONFIG.render.monoFovDeg);
   rig.setStereo(useSensor && cardboard);
   exitEl.hidden = rig.stereo;

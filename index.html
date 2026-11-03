@@ -47,9 +47,12 @@
       }
       #stereo-overlay .eye {
         position: absolute; top: 0; bottom: 0; width: 50%;
-        background: radial-gradient(ellipse 60% 70% at 50% 50%, transparent 70%, rgba(0,0,0,0.85) 100%);
+        background: radial-gradient(ellipse 60% 70% at var(--lens-l, 50%) var(--lens-y, 50%), transparent 70%, rgba(0,0,0,0.85) 100%);
       }
-      #stereo-overlay .eye.r { left: 50%; }
+      #stereo-overlay .eye.r {
+        left: 50%;
+        background: radial-gradient(ellipse 60% 70% at var(--lens-r, 50%) var(--lens-y, 50%), transparent 70%, rgba(0,0,0,0.85) 100%);
+      }
 
       /* Full-screen 2D pages: launch/settings and the report. */
       .page {

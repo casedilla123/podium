@@ -140,6 +140,11 @@ export const CONFIG = {
     eyeFovDeg: 80,
     eyeFovMinDeg: 60,
     eyeFovMaxDeg: 100,
+    /**
+     * CSS pixels per millimetre of screen. iPhones are about 153-166 points per
+     * inch (6.0-6.5 per mm); the lens spacing slider absorbs the difference.
+     */
+    cssPxPerMm: 6.1,
   },
 
   budget: {
