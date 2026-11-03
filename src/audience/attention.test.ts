@@ -26,15 +26,19 @@ function secondsToFall(mood: Mood, below: number, roomFactor = 1): number {
 }
 
 describe('gazeCredit', () => {
-  it('is 1 at the centre, 0 at and beyond the cone edge', () => {
-    expect(gazeCredit(0, 12)).toBeCloseTo(1);
-    expect(gazeCredit(12, 12)).toBe(0);
-    expect(gazeCredit(40, 12)).toBe(0);
+  it('gives full credit anywhere in the core, not just dead centre', () => {
+    expect(gazeCredit(0, 12, 28)).toBe(1);
+    expect(gazeCredit(11.9, 12, 28)).toBe(1);
   });
-  it('falls off monotonically', () => {
+  it('is 0 at and beyond the cone edge', () => {
+    expect(gazeCredit(28, 12, 28)).toBe(0);
+    expect(gazeCredit(40, 12, 28)).toBe(0);
+  });
+  it('fades out smoothly between the core and the edge', () => {
+    expect(gazeCredit(20, 12, 28)).toBeCloseTo(0.5);
     let prev = 1.01;
-    for (let a = 0; a < 12; a += 0.5) {
-      const c = gazeCredit(a, 12);
+    for (let a = 12.5; a < 28; a += 0.5) {
+      const c = gazeCredit(a, 12, 28);
       expect(c).toBeLessThan(prev);
       prev = c;
     }

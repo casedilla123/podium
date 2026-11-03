@@ -65,14 +65,20 @@ let room: Room;
 let lighting: Lighting;
 let crowd: Crowd;
 
-// Gaze-credit cone outline for debug (G): the 12° circle at 3 m.
-const coneR = 3 * Math.tan(THREE.MathUtils.degToRad(CONFIG.gaze.creditConeDeg));
-const cone = new THREE.Mesh(
-  new THREE.RingGeometry(coneR - 0.012, coneR, 64),
-  new THREE.MeshBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.6, depthTest: false }),
-);
+// Gaze-credit area for debug (G), drawn 3 m away.
+const ringAt = (deg: number, opacity: number) => {
+  const r = 3 * Math.tan(THREE.MathUtils.degToRad(deg));
+  return new THREE.Mesh(
+    new THREE.RingGeometry(r - 0.012, r, 64),
+    new THREE.MeshBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity, depthTest: false }),
+  );
+};
+// Solid ring: full credit inside it. Faint ring: credit fades to nothing here.
+const cone = ringAt(CONFIG.gaze.creditFullDeg, 0.7);
+cone.add(ringAt(CONFIG.gaze.creditConeDeg, 0.3));
 cone.position.z = -3;
 cone.renderOrder = 999;
+cone.children[0].renderOrder = 999;
 cone.visible = false;
 rig.head.add(cone);
 

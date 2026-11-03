@@ -169,8 +169,13 @@ export const CONFIG = {
   },
 
   gaze: {
-    /** Members within this angle of the view centre get credit. */
-    creditConeDeg: 12,
+    /**
+     * Anyone within creditFullDeg of the centre of your view gets full credit,
+     * fading to none at creditConeDeg. Wide on purpose: looking in a person's
+     * general direction counts, you don't have to aim at each face.
+     */
+    creditFullDeg: 12,
+    creditConeDeg: 28,
     dwellSeconds: 1.2,
     reticleDefaultDistance: 3,
     /** Looking down past this pitch, roughly at the podium, counts as looking down. */

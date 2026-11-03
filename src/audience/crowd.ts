@@ -115,12 +115,12 @@ export class Crowd {
 
   /** Gaze credit for every member from the head's view direction. */
   computeCredits(eye: THREE.Vector3, forward: THREE.Vector3): readonly number[] {
-    const cone = CONFIG.gaze.creditConeDeg;
+    const { creditFullDeg: full, creditConeDeg: cone } = CONFIG.gaze;
     const v = new THREE.Vector3();
     for (let i = 0; i < this.members.length; i++) {
       v.subVectors(this.headPositions[i], eye).normalize();
       const angle = THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(v.dot(forward), -1, 1)));
-      this.credits[i] = gazeCredit(angle, cone);
+      this.credits[i] = gazeCredit(angle, full, cone);
     }
     return this.credits;
   }

@@ -36,10 +36,14 @@ export interface VoiceFactors {
 
 export const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
 
-/** Gaze credit 0..1: 1 at the centre of view, smoothly falling to 0 at the cone edge. */
-export function gazeCredit(angleDeg: number, coneDeg: number): number {
+/**
+ * Gaze credit 0..1: full credit within fullDeg of the centre of view, then a
+ * smooth fade to 0 at coneDeg.
+ */
+export function gazeCredit(angleDeg: number, fullDeg: number, coneDeg: number): number {
+  if (angleDeg <= fullDeg) return 1;
   if (angleDeg >= coneDeg) return 0;
-  return 0.5 * (1 + Math.cos((Math.PI * angleDeg) / coneDeg));
+  return 0.5 * (1 + Math.cos((Math.PI * (angleDeg - fullDeg)) / (coneDeg - fullDeg)));
 }
 
 /** Multiplier on decay from how the speaker sounds. */
