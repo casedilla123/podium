@@ -37,6 +37,11 @@ type AppState = 'launch' | 'recenter' | 'setup' | 'countdown' | 'talk' | 'ended'
 const params = new URLSearchParams(location.search);
 const forceDebug = params.has('debug');
 const isTouch = navigator.maxTouchPoints > 0;
+// Opened from the Home Screen icon (no browser bars) rather than a Safari tab.
+const isInstalled =
+  (navigator as Navigator & { standalone?: boolean }).standalone === true ||
+  matchMedia('(display-mode: standalone)').matches ||
+  matchMedia('(display-mode: fullscreen)').matches;
 
 let settings: Settings = loadSettings();
 
@@ -74,11 +79,21 @@ rig.head.add(cone);
 const hud = new Hud();
 const helpEl = document.getElementById('help')!;
 
+// Size to the on-screen box, not window.innerWidth/innerHeight: iOS reports stale
+// sizes right after rotating and while Safari's bars move, which squashes the eye views.
+let viewW = 0;
+let viewH = 0;
 function resize(): void {
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  rig.resize(window.innerWidth, window.innerHeight);
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  if (w === viewW && h === viewH) return;
+  viewW = w;
+  viewH = h;
+  renderer.setSize(w, h);
+  rig.resize(w, h);
 }
 window.addEventListener('resize', resize);
+window.visualViewport?.addEventListener('resize', resize);
 resize();
 
 // ---------- In-world UI (built once, laid out per venue) ----------
@@ -304,7 +319,14 @@ const launchSettings = buildSettings(document.getElementById('settings')!, setti
   settings = s;
   saveSettings(s);
   if (venueChanged) setVenue(s.venue);
+  refreshInstallTip();
 });
+
+const installTipEl = document.getElementById('install-tip')!;
+/** In a browser tab on a phone, Cardboard mode can't go full screen: say how to fix it. */
+function refreshInstallTip(): void {
+  installTipEl.hidden = !(isTouch && !isInstalled && !forceDebug && settings.view === 'cardboard');
+}
 
 function refreshLastReportButton(): void {
   lastReportEl.hidden = loadHistory().length === 0;
@@ -537,6 +559,7 @@ function frame(now: number): void {
   last = now;
   // Nothing to draw behind a 2D page: save the battery.
   if (state === 'launch' || state === 'report') return;
+  resize(); // cheap when nothing changed; catches late size updates after rotation
   const simDt = dt * (fast ? CONFIG.debug.timeScaleFast : 1);
   simTime += simDt;
 
@@ -627,6 +650,7 @@ function frame(now: number): void {
 setVenue(settings.venue);
 hidePanels();
 refreshLastReportButton();
+refreshInstallTip();
 renderer.setAnimationLoop(frame);
 
 // Console hook for debug mode, so checks can be scripted: podium.look.yaw = 0.3, podium.go('talk').

@@ -110,6 +110,11 @@
         display: block; width: 100%; margin-top: 10px; padding: 12px; border-radius: 12px; cursor: pointer;
         background: transparent; border: 1px solid var(--line); font-weight: 600;
       }
+      .install { background: #2a2417; border: 1px solid #5c4a24; border-radius: 12px; padding: 12px 14px; margin: 0 0 14px; }
+      .install strong { display: block; color: var(--accent); }
+      .install p { margin: 6px 0 0; }
+      .install ol { margin: 8px 0 0; padding-left: 20px; }
+      .install li + li { margin-top: 4px; }
       .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; }
       #status { color: var(--accent); min-height: 1.4em; margin: 10px 0 4px; }
       details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
@@ -203,6 +208,17 @@
         <h1>Podium</h1>
         <p class="tag">Practise a talk in front of a virtual audience that reacts to where you look and how you sound. Then see how you did.</p>
         <div id="settings"></div>
+
+        <div id="install-tip" class="install" hidden>
+          <strong>Open Podium from your Home Screen for full screen</strong>
+          <p>Safari on iPhone can't hide its address bar, so the two views won't fill the screen or line up with the viewer's lenses.</p>
+          <ol>
+            <li>Tap Safari's <b>Share</b> button (on newer iOS it's inside the <b>•••</b> menu).</li>
+            <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+            <li>Close Safari and open <b>Podium</b> from the new icon.</li>
+          </ol>
+          <p class="hint">Hand-held mode works fine right here in Safari.</p>
+        </div>
 
         <button id="start" class="btn-primary" type="button">Start</button>
         <div id="status" role="status"></div>
